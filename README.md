@@ -1,4 +1,4 @@
-# BitkubBot
+# BitkubBot (Thai version Below)
 
 A Python trading bot for monitoring moving average crossovers and simulating trades on Bitkub using Binance price data.
 
@@ -70,3 +70,87 @@ python BitkubBot.py
 
 ## License
 MIT License
+
+BitkubBot
+บอทเทรดคริปโต Python สำหรับตรวจสอบการตัดกันของเส้นค่าเฉลี่ย (Moving Average) และจำลองการซื้อขายบน Bitkub โดยใช้ข้อมูลราคาจาก Binance
+
+คุณสมบัติ
+รองรับการตัดกันของเส้น SMA, EMA และ WMA
+
+กำหนดคู่เทรด, ขนาดตำแหน่ง และการตั้งค่าตัวบ่งชี้ได้
+
+จำลองการซื้อ/ขาย (การเทรดแบบจำลอง)
+
+โหลดการตั้งค่าจาก config.json หรือสร้างแบบโต้ตอบ
+
+ตรวจสอบตามช่วงเวลาที่กำหนด (เช่น 1 นาที, 1 ชั่วโมง, 1 วัน)
+
+ความต้องการ
+Python 3.8+
+
+pip (ตัวจัดการแพ็คเกจ Python)
+
+ไลบรารีที่จำเป็น
+requests
+
+python-binance
+
+ติดตั้ง dependencies ด้วยคำสั่ง:
+
+bash
+pip install requests python-binance
+การติดตั้ง
+โคลน repository
+
+bash
+git clone <your-repo-url>
+cd BitkubTrendTrader
+ติดตั้ง dependencies
+
+bash
+pip install requests python-binance
+ตั้งค่า API keys ของ Binance (สำหรับข้อมูลราคา)
+
+ตั้งค่าตัวแปรสภาพแวดล้อม:
+
+bash
+export BINANCE_API_KEY=your_api_key
+export BINANCE_API_SECRET=your_api_secret
+หรือตั้งค่าใน shell profile (เช่น .bashrc)
+
+ตั้งค่าบอท
+
+เมื่อรันครั้งแรก บอทจะถามเกี่ยวกับคู่เทรด, ขนาดตำแหน่ง, การตั้งค่าตัวบ่งชี้ เป็นต้น และบันทึกลงใน config.json
+
+สามารถแก้ไข config.json เพื่อเปลี่ยนการตั้งค่าในภายหลัง
+
+การใช้งาน
+bash
+python BitkubBot.py
+บอทจะตรวจสอบคู่เทรดและช่วงเวลาที่กำหนด พิมพ์ค่าเส้นค่าเฉลี่ย และจำลองการซื้อขายตามสัญญาณการตัดกัน
+
+การซื้อขายทั้งหมดเป็นแบบจำลอง (ไม่มีการซื้อขายจริงเกิดขึ้น)
+
+ตัวเลือกการตั้งค่า
+bitkub_symbol: คู่เทรดบน Bitkub (เช่น THB_BTC)
+
+binance_symbol: คู่เทรดบน Binance (เช่น BTCUSDT)
+
+position_size_thb: จำนวนเงินบาทที่ใช้ต่อการเทรด
+
+trading_fee_percentage: ค่าธรรมเนียมการเทรดเป็นเปอร์เซ็นต์ (เช่น 0.25 สำหรับ 0.25%)
+
+indicator_settings: คาบเวลาของเส้นค่าเฉลี่ยเร็ว/ช้า และประเภท (SMA, EMA, WMA)
+
+timeframe: ช่วงเวลาแท่งเทียน (เช่น 1m, 1h, 1d)
+
+self_buy_enabled: เริ่มต้นด้วยการถือครองแบบจำลอง
+
+self_buy_amount_coin: จำนวนเหรียญที่จะเริ่มถือครองหากเปิดใช้งาน self-buy
+
+หมายเหตุ
+บอทนี้มีวัตถุประสงค์เพื่อการศึกษาและการวิจัยเท่านั้น
+
+ไม่มีการเทรดจริงเกิดขึ้น การซื้อขายทั้งหมดเป็นแบบจำลอง
+
+ต้องมีการเชื่อมต่ออินเทอร์เน็ตเพื่อดึงข้อมูลราคา

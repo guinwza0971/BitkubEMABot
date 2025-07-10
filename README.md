@@ -32,15 +32,7 @@ pip install requests python-binance
    ```bash
    pip install requests python-binance
    ```
-3. **Set Binance API keys** (for price data)
-   - Set environment variables:
-     ```bash
-     export BINANCE_API_KEY=your_api_key
-     export BINANCE_API_SECRET=your_api_secret
-     ```
-   - Or set them in your shell profile (e.g., `.bashrc`)
-
-4. **Configure the bot**
+3. **Configure the bot**
    - On first run, the bot will prompt you for trading pair, position size, indicator settings, etc., and save them to `config.json`.
    - You can edit `config.json` later to change settings.
 
@@ -105,15 +97,7 @@ pip install requests python-binance
    ```bash
    pip install requests python-binance
    ```
-3. **ตั้งค่า API keys ของ Binance (สำหรับข้อมูลราคา)**
-   - ตั้งค่าตัวแปรสภาพแวดล้อม:
-     ```bash
-     export BINANCE_API_KEY=your_api_key
-     export BINANCE_API_SECRET=your_api_secret
-     ```
-   - หรือตั้งค่าใน shell profile (เช่น `.bashrc`)
-
-4. **ตั้งค่าบอท**
+3. **ตั้งค่าบอท**
    - เมื่อรันครั้งแรก บอทจะถามเกี่ยวกับคู่เทรด, ขนาดตำแหน่ง, การตั้งค่าตัวบ่งชี้ เป็นต้น และบันทึกลงใน `config.json`
    - สามารถแก้ไข `config.json` เพื่อเปลี่ยนการตั้งค่าในภายหลัง
 

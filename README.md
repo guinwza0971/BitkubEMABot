@@ -68,7 +68,6 @@ python BitkubBot.py
 - No real trading is performed; all trades are simulated.
 - You must have a working internet connection to fetch price data.
 
-## License
 MIT License
 ---
 

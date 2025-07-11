@@ -2,7 +2,7 @@
   <img src="cashburnner.png" alt="Cash Burner Logo" width="200"/>
 </p>
 
-# Cash Burner 888k bitkub trading bot
+# Cash Burner bitkub trading bot
 
 บอทเทรดคริปโต Python สำหรับตรวจสอบสัญญาณอินดิเคเตอร์ (Moving Average Crossover) และจำลองการซื้อขายบน Bitkub โดยใช้ข้อมูลราคาจาก Binance
 

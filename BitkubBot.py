@@ -171,7 +171,7 @@ def get_crypto_data_and_mas(symbol, interval, ma_periods, fetch_limit, client, m
         fetch_limit (int): The total number of past periods to fetch.
                            Should be at least the largest MA period + 2 to calculate
                            MAs for the current and previous confirmed candles.
-        client (binance.client.Client): The initialized Binance client.
+        client (binance.client.Client): The initialized Binance client (can be None for free API).
         ma_type (str): Type of moving average ('SMA', 'EMA', 'WMA').
 
     Returns:
@@ -207,6 +207,7 @@ def get_crypto_data_and_mas(symbol, interval, ma_periods, fetch_limit, client, m
 
     try:
         # Fetch historical klines (candlestick data)
+        # Assuming free API access to get_klines without API key/secret
         klines = client.get_klines(symbol=symbol, interval=binance_interval, limit=fetch_limit)
 
         if not klines:
@@ -252,15 +253,6 @@ def get_crypto_data_and_mas(symbol, interval, ma_periods, fetch_limit, client, m
         print(f"An error occurred during data fetch: {e}")
         return {'close_prices': [], 'current_confirmed_mas': {}, 'previous_confirmed_mas': {}}
 
-def get_binance_price(client, symbol):
-    """Fetches the current ticker price for a given symbol from Binance."""
-    try:
-        ticker = client.get_symbol_ticker(symbol=symbol)
-        return float(ticker['price'])
-    except Exception as e:
-        print(f"Error fetching price for {symbol} from Binance: {e}")
-        return None
-
 def get_bitkub_market_data(symbol):
     """
     Fetches current ticker information for a given symbol from Bitkub,
@@ -288,7 +280,7 @@ def get_bitkub_market_data(symbol):
         print(f"An unexpected error occurred while fetching Bitkub market data for {symbol}: {e}")
         return None
 
-def place_buy_order_bitkub(api_key, api_secret, bitkub_symbol_config, amount_thb, rate, signal_type="primary"):
+def place_buy_order_bitkub(api_key, api_secret, bitkub_symbol_config, amount_thb, order_type, rate=None, signal_type="primary"):
     """
     Places a buy order on Bitkub.
     Args:
@@ -296,7 +288,8 @@ def place_buy_order_bitkub(api_key, api_secret, bitkub_symbol_config, amount_thb
         api_secret (str): Bitkub API Secret.
         bitkub_symbol_config (str): The trading pair from config (e.g., 'THB_OMNI').
         amount_thb (float): The amount of THB to spend.
-        rate (float): The price at which to place the limit order.
+        order_type (str): 'limit' or 'market'.
+        rate (float, optional): The price at which to place the limit order. Required if order_type is 'limit'.
         signal_type (str): 'primary' or 'backup' to indicate the signal source.
     Returns:
         dict: The response from the Bitkub API.
@@ -306,14 +299,22 @@ def place_buy_order_bitkub(api_key, api_secret, bitkub_symbol_config, amount_thb
     quote_currency = bitkub_symbol_config.split('_')[0]
     api_symbol = f"{base_currency.lower()}_{quote_currency.lower()}"
 
-    print(f"REAL BUY ({signal_type.upper()} SIGNAL): Attempting to buy {bitkub_symbol_config} with {amount_thb} THB at rate {rate}...")
+    print(f"REAL BUY ({signal_type.upper()} SIGNAL): Attempting to buy {bitkub_symbol_config} with {amount_thb} THB using {order_type} order...")
     path = '/api/v3/market/place-bid'
     json_body = {
         'sym': api_symbol,
-        'amt': float(f'{amount_thb:.{get_display_decimals(amount_thb)}f}'), # Format to appropriate decimals
-        'rat': float(f'{rate:.{get_display_decimals(rate)}f}'), # Format to appropriate decimals
-        'typ': 'limit'
+        'amt': float(f'{amount_thb:.{get_display_decimals(amount_thb)}f}'), # Amount of THB to spend
+        'typ': order_type
     }
+    if order_type == 'limit' and rate is not None:
+        json_body['rat'] = float(f'{rate:.{get_display_decimals(rate)}f}')
+        print(f"  Limit rate set to: {rate:.{get_display_decimals(rate)}f}")
+    elif order_type == 'market':
+        # For market buy, 'rat' is not typically used or can be omitted.
+        # Bitkub's sample implies 'rat' can be present, but it's usually ignored for market orders.
+        # We will not set 'rat' for market orders here.
+        pass
+
     response = bitkub_api_call(api_key, api_secret, 'POST', path, json_body=json_body)
     if response and response.get('error') == 0:
         print(f"REAL BUY SUCCESS: Order ID {response['result'].get('id')}, received approx. {response['result'].get('rec', 'N/A')} {base_currency}.")
@@ -321,7 +322,7 @@ def place_buy_order_bitkub(api_key, api_secret, bitkub_symbol_config, amount_thb
         print(f"REAL BUY FAILED: {response.get('message', 'Unknown error')}. Error code: {response.get('error', 'N/A')}")
     return response
 
-def place_sell_order_bitkub(api_key, api_secret, bitkub_symbol_config, coin_amount, rate, signal_type="primary"):
+def place_sell_order_bitkub(api_key, api_secret, bitkub_symbol_config, coin_amount, order_type, rate=None, signal_type="primary"):
     """
     Places a sell order on Bitkub.
     Args:
@@ -329,7 +330,8 @@ def place_sell_order_bitkub(api_key, api_secret, bitkub_symbol_config, coin_amou
         api_secret (str): Bitkub API Secret.
         bitkub_symbol_config (str): The trading pair from config (e.g., 'THB_OMNI').
         coin_amount (float): The amount of coin to sell.
-        rate (float): The price at which to place the limit order.
+        order_type (str): 'limit' or 'market'.
+        rate (float, optional): The price at which to place the limit order. Required if order_type is 'limit'.
         signal_type (str): 'primary' or 'backup' to indicate the signal source.
     Returns:
         dict: The response from the Bitkub API.
@@ -339,14 +341,21 @@ def place_sell_order_bitkub(api_key, api_secret, bitkub_symbol_config, coin_amou
     quote_currency = bitkub_symbol_config.split('_')[0]
     api_symbol = f"{base_currency.lower()}_{quote_currency.lower()}"
 
-    print(f"REAL SELL ({signal_type.upper()} SIGNAL): Attempting to sell {coin_amount:.8f} {base_currency} at rate {rate}...")
+    print(f"REAL SELL ({signal_type.upper()} SIGNAL): Attempting to sell {coin_amount:.8f} {base_currency} using {order_type} order...")
     path = '/api/v3/market/place-ask'
     json_body = {
         'sym': api_symbol,
-        'amt': float(f'{coin_amount:.8f}'), # Coin amount typically needs more precision
-        'rat': float(f'{rate:.{get_display_decimals(rate)}f}'),
-        'typ': 'limit'
+        'amt': float(f'{coin_amount:.8f}'), # Amount of coin to sell
+        'typ': order_type
     }
+    if order_type == 'limit' and rate is not None:
+        json_body['rat'] = float(f'{rate:.{get_display_decimals(rate)}f}')
+        print(f"  Limit rate set to: {rate:.{get_display_decimals(rate)}f}")
+    elif order_type == 'market':
+        # For market sell, 'rat' is not typically used or can be omitted.
+        # We will not set 'rat' for market orders here.
+        pass
+
     response = bitkub_api_call(api_key, api_secret, 'POST', path, json_body=json_body)
     if response and response.get('error') == 0:
         print(f"REAL SELL SUCCESS: Order ID {response['result'].get('id')}, received approx. {response['result'].get('rec', 'N/A')} {quote_currency}.")
@@ -390,12 +399,12 @@ def get_user_input_and_create_config():
     config['bitkub_api_key'] = input("Enter your Bitkub API Key: ").strip()
     config['bitkub_api_secret'] = input("Enter your Bitkub API Secret: ").strip()
 
-    config['binance_api_key'] = input("Enter your Binance API Key (leave empty if not using): ").strip()
-    config['binance_api_secret'] = input("Enter your Binance API Secret (leave empty if not using): ").strip()
+    # Binance API keys are no longer prompted, but kept in config structure as empty strings
+    config['binance_api_key'] = ""
+    config['binance_api_secret'] = ""
 
     config['bitkub_symbol'] = input("Enter Coin to trade in Bitkub format (e.g., THB_BTC): ").strip().upper()
     # For Binance, the symbol is usually BASEASSET+QUOTEASSET (e.g., BTCUSDT)
-    # If the Bitkub symbol is THB_BTC, the Binance equivalent for historical data might be BTCUSDT
     # User needs to specify the correct Binance pair for the base asset against USDT or a major stablecoin
     config['binance_symbol'] = input(f"Enter corresponding Binance symbol for historical data (e.g., {config['bitkub_symbol'].split('_')[1]}USDT): ").strip().upper()
 
@@ -448,13 +457,34 @@ def get_user_input_and_create_config():
     config['indicator_settings'] = indicator_settings
 
     while True:
-        timeframe = input("Enter timeframe (e.g., 1s, 1m, 1h, 1d, default 1w for production, 1s for testing): ").strip() or "1w"
+        # Reverted to Binance supported intervals
+        timeframe = input("Enter timeframe (e.g., 1s, 1m, 1h, 1d, 1w, default 1w for production, 1s for testing): ").strip() or "1w"
         # Basic validation for common intervals, can be expanded
         if timeframe in ['1s', '1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M']:
             config['timeframe'] = timeframe
             break
         else:
             print("Invalid timeframe. Please enter a valid interval (e.g., 1s, 1m, 1d, 1w).")
+
+    while True:
+        order_type_input = input("Choose order execution type (limit/market, default limit): ").strip().lower() or "limit"
+        if order_type_input in ['limit', 'market']:
+            config['order_execution_type'] = order_type_input
+            break
+        else:
+            print("Invalid order type. Please enter 'limit' or 'market'.")
+
+    config['max_tolerable_slippage_percentage'] = 0.0
+    if config['order_execution_type'] == 'limit':
+        while True:
+            try:
+                slippage_input = input("Enter maximum tolerable slippage in percentage (e.g., 2.0 for 2%, default 2.0): ") or "2.0"
+                config['max_tolerable_slippage_percentage'] = float(slippage_input)
+                if not (0 <= config['max_tolerable_slippage_percentage'] <= 100):
+                    raise ValueError("Slippage percentage must be between 0 and 100.")
+                break
+            except ValueError as e:
+                print(f"Invalid input: {e}. Please enter a number between 0 and 100.")
 
     while True:
         self_buy_enabled_str = input("Enable initial buy at startup (for testing/starting with a position)? (true/false, default false): ").strip().lower() or "false"
@@ -490,8 +520,8 @@ def monitor_mas_on_candle_close():
 
     bitkub_api_key = config['bitkub_api_key']
     bitkub_api_secret = config['bitkub_api_secret']
-    binance_api_key = config['binance_api_key']
-    binance_api_secret = config['binance_api_secret']
+    binance_api_key = config['binance_api_key'] # Will be empty string
+    binance_api_secret = config['binance_api_secret'] # Will be empty string
 
     binance_symbol = config['binance_symbol']
     bitkub_symbol = config['bitkub_symbol'] # e.g., THB_OMNI
@@ -503,6 +533,8 @@ def monitor_mas_on_candle_close():
     interval = config['timeframe']
     self_buy_enabled = config['self_buy_enabled']
     self_buy_amount_coin = config['self_buy_amount_coin']
+    order_execution_type = config['order_execution_type']
+    max_slippage_percentage = config['max_tolerable_slippage_percentage']
 
     # Determine fetch_limit based on the largest MA period
     fetch_limit = max(fast_ma_period, slow_ma_period) + 2
@@ -525,36 +557,33 @@ def monitor_mas_on_candle_close():
     duration_sec = interval_duration_seconds[interval]
     print(f"Starting {ma_type} crossover monitoring for {binance_symbol} at {interval} interval. Press Ctrl+C to stop.")
 
-    # Initialize Binance client
+    # Initialize Binance client with potentially empty API keys
     binance_client = Client(binance_api_key, binance_api_secret)
 
     # Trading state variables
     base_currency = bitkub_symbol.split('_')[1] # e.g., OMNI from THB_OMNI
     quote_currency = bitkub_symbol.split('_')[0] # e.g., THB from THB_OMNI
 
-    current_holding_amount = 0.0
+    bot_managed_holding = 0.0 # Amount of coin managed by the bot strategy
     last_trade_type = None # 'BUY', 'SELL', or None
 
-    # Get initial THB and Coin balances from Bitkub
+    # Get initial THB and Coin balances from Bitkub (for display purposes only)
     initial_thb_balance = get_bitkub_balance(bitkub_api_key, bitkub_api_secret, quote_currency)
     initial_coin_balance = get_bitkub_balance(bitkub_api_key, bitkub_api_secret, base_currency)
 
     print(f"Initial Bitkub {quote_currency} balance: {initial_thb_balance:.2f}")
-    print(f"Initial Bitkub {base_currency} balance: {initial_coin_balance:.8f}")
+    print(f"Initial Bitkub {base_currency} balance: {initial_coin_balance:.8f} (Total account balance)")
 
-    # Set initial holding based on actual balance or self-buy config
+    # Set initial bot_managed_holding based on self-buy config
     if self_buy_enabled and self_buy_amount_coin > 0:
-        current_holding_amount = self_buy_amount_coin
+        bot_managed_holding = self_buy_amount_coin
         last_trade_type = 'BUY'
-        print(f"Initial buy enabled: Bot starts with {current_holding_amount:.8f} {base_currency} (simulated).")
-    elif initial_coin_balance > 0:
-        current_holding_amount = initial_coin_balance
-        last_trade_type = 'BUY' # Assume if we have coin, we are in a 'bought' state
-        print(f"Initial holding detected from Bitkub balance: {current_holding_amount:.8f} {base_currency}.")
+        print(f"Initial buy enabled: Bot starts with {bot_managed_holding:.8f} {base_currency} (simulated managed holding).")
     else:
-        current_holding_amount = 0.0
-        last_trade_type = 'SELL' # Assume if no coin, we are in a 'sold' state (cash)
-        print(f"Initial holding: {current_holding_amount:.8f} {base_currency} (cash).")
+        # If self-buy is not enabled or amount is 0, bot starts with no managed holding
+        bot_managed_holding = 0.0
+        last_trade_type = 'SELL' # Assume bot is in 'cash' state if not managing any coin
+        print(f"Initial bot managed holding: {bot_managed_holding:.8f} {base_currency} (cash).")
     
     previous_derived_bot_state = "UNKNOWN" # Will be updated after first MA calculation
 
@@ -564,29 +593,28 @@ def monitor_mas_on_candle_close():
 
     while True:
         try:
-            # Get current Unix timestamp in milliseconds
             current_unix_ms = int(time.time() * 1000)
-            interval_duration_ms = duration_sec * 1000
-
-            # Calculate the start time of the *current* interval
-            current_interval_start_ms = (current_unix_ms // interval_duration_ms) * interval_duration_ms
-
-            # Calculate the expected close time of the *current* interval
-            expected_current_candle_close_ms = current_interval_start_ms + interval_duration_ms - 1
-
-            # Calculate the expected close time of the *next* interval
-            next_candle_close_time_ms = expected_current_candle_close_ms + interval_duration_ms
-
-            # Calculate time to wait until the next candle is expected to close
-            time_to_wait_ms = next_candle_close_time_ms - current_unix_ms
-
-            if time_to_wait_ms > 0:
-                print(f"Waiting {time_to_wait_ms / 1000:.2f} seconds for the next {interval} candle to close...")
-                time.sleep(time_to_wait_ms / 1000)
+            
+            # Special handling for '1m' timeframe update interval
+            if interval == '1m':
+                wait_time_seconds = 10 # Update every 10 seconds for 1m timeframe
+                print(f"Waiting {wait_time_seconds:.2f} seconds for next update (1m timeframe specific)...")
+                time.sleep(wait_time_seconds)
             else:
-                print(f"Already past expected {interval} candle close time, fetching immediately.")
+                # Original logic for other timeframes
+                interval_duration_ms = duration_sec * 1000
+                current_interval_start_ms = (current_unix_ms // interval_duration_ms) * interval_duration_ms
+                expected_current_candle_close_ms = current_interval_start_ms + interval_duration_ms - 1
+                next_candle_close_time_ms = expected_current_candle_close_ms + interval_duration_ms
+                time_to_wait_ms = next_candle_close_time_ms - current_unix_ms
 
-            # Now that the candle should have closed, fetch the data and calculate MAs
+                if time_to_wait_ms > 0:
+                    print(f"Waiting {time_to_wait_ms / 1000:.2f} seconds for the next {interval} candle to close...")
+                    time.sleep(time_to_wait_ms / 1000)
+                else:
+                    print(f"Already past expected {interval} candle close time, fetching immediately.")
+
+            # Now that the candle should have closed (or 10 seconds passed for 1m), fetch the data and calculate MAs
             data = get_crypto_data_and_mas(binance_symbol, interval, [fast_ma_period, slow_ma_period], fetch_limit, binance_client, ma_type)
 
             current_confirmed_mas = data['current_confirmed_mas']
@@ -644,39 +672,51 @@ def monitor_mas_on_candle_close():
                     # Check for Primary Buy Signal
                     if fast_ma_current > slow_ma_current and fast_ma_previous <= slow_ma_previous:
                         print(f"!!! PRIMARY BUY SIGNAL DETECTED !!! {fast_ma_period}-{interval} {ma_type} crossed ABOVE {slow_ma_period}-{interval} {ma_type}.")
-                        # Check if we are not already holding (or if last trade was a sell)
-                        if last_trade_type != 'BUY':
+                        # Check if bot is not already in a 'BUY' state with managed holdings
+                        if last_trade_type != 'BUY' or bot_managed_holding == 0.0:
+                            order_rate = None
+                            if order_execution_type == 'limit':
+                                order_rate = current_bitkub_ask_price * (1 + max_slippage_percentage / 100)
+                                print(f"  Calculated buy limit rate with slippage: {order_rate:.{get_display_decimals(order_rate)}f}")
+                            
                             # Attempt to place a real buy order on Bitkub
                             buy_response = place_buy_order_bitkub(
-                                bitkub_api_key, bitkub_api_secret, bitkub_symbol, position_size_thb, current_bitkub_ask_price, signal_type="primary"
+                                bitkub_api_key, bitkub_api_secret, bitkub_symbol, position_size_thb, order_execution_type, order_rate, signal_type="primary"
                             )
                             if buy_response and buy_response.get('error') == 0:
-                                # Update holding amount and last trade type based on successful order
-                                # For simplicity, assuming full fill immediately. In real bot, you'd monitor order status.
-                                current_holding_amount = get_bitkub_balance(bitkub_api_key, bitkub_api_secret, base_currency)
+                                # Assuming 'rec' in result is the received coin amount
+                                received_coin = float(buy_response['result'].get('rec', 0.0))
+                                bot_managed_holding += received_coin # Add purchased amount to managed holding
                                 last_trade_type = 'BUY'
+                                print(f"Real primary buy SUCCESS. Bot now manages: {bot_managed_holding:.8f} {base_currency}.")
                             else:
-                                print("Real primary buy order failed, not updating holding amount.")
+                                print("Real primary buy order failed, not updating bot managed holding.")
                         else:
-                            print("Already in a 'HOLDING' state (from previous buy), skipping primary buy order.")
+                            print("Already in a 'HOLDING' state (from previous buy) with managed coins, skipping primary buy order.")
 
                     # Check for Primary Sell Signal
                     elif fast_ma_current < slow_ma_current and fast_ma_previous >= slow_ma_previous:
                         print(f"!!! PRIMARY SELL SIGNAL DETECTED !!! {fast_ma_period}-{interval} {ma_type} crossed BELOW {slow_ma_period}-{interval} {ma_type}.")
-                        # Check if we are currently holding coins (or if last trade was a buy)
-                        if current_holding_amount > 0 and last_trade_type != 'SELL':
+                        # Check if bot is currently holding coins it manages (or if last trade was a buy)
+                        if bot_managed_holding > 0 and last_trade_type != 'SELL':
+                            order_rate = None
+                            if order_execution_type == 'limit':
+                                order_rate = current_bitkub_bid_price * (1 - max_slippage_percentage / 100)
+                                print(f"  Calculated sell limit rate with slippage: {order_rate:.{get_display_decimals(order_rate)}f}")
+
                             # Attempt to place a real sell order on Bitkub
                             sell_response = place_sell_order_bitkub(
-                                bitkub_api_key, bitkub_api_secret, bitkub_symbol, current_holding_amount, current_bitkub_bid_price, signal_type="primary"
+                                bitkub_api_key, bitkub_api_secret, bitkub_symbol, bot_managed_holding, order_execution_type, order_rate, signal_type="primary"
                             )
                             if sell_response and sell_response.get('error') == 0:
-                                # Update holding amount and last trade type based on successful order
-                                current_holding_amount = 0.0 # Assuming full sell
+                                # Assuming full sell of managed holding
+                                bot_managed_holding = 0.0 
                                 last_trade_type = 'SELL'
+                                print(f"Real primary sell SUCCESS. Bot now manages: {bot_managed_holding:.8f} {base_currency}.")
                             else:
-                                print("Real primary sell order failed, not updating holding amount.")
+                                print("Real primary sell order failed, not updating bot managed holding.")
                         else:
-                            print("Not holding any coins or already in 'CASH' state (from previous sell), skipping primary sell order.")
+                            print("Not holding any bot-managed coins or already in 'CASH' state (from previous sell), skipping primary sell order.")
                     else:
                         print("No primary crossover detected in this update.")
 
@@ -688,26 +728,39 @@ def monitor_mas_on_candle_close():
                     # If current state is HOLDING but previous was CASH, and no primary buy signal
                     if derived_bot_state == "HOLDING" and previous_derived_bot_state == "CASH" and last_trade_type != 'BUY':
                         print(f"!!! BACKUP BUY SIGNAL DETECTED !!! State changed from CASH to HOLDING without primary crossover.")
+                        order_rate = None
+                        if order_execution_type == 'limit':
+                            order_rate = current_bitkub_ask_price * (1 + max_slippage_percentage / 100)
+                            print(f"  Calculated backup buy limit rate with slippage: {order_rate:.{get_display_decimals(order_rate)}f}")
+                        
                         buy_response = place_buy_order_bitkub(
-                            bitkub_api_key, bitkub_api_secret, bitkub_symbol, position_size_thb, current_bitkub_ask_price, signal_type="backup"
+                            bitkub_api_key, bitkub_api_secret, bitkub_symbol, position_size_thb, order_execution_type, order_rate, signal_type="backup"
                         )
                         if buy_response and buy_response.get('error') == 0:
-                            current_holding_amount = get_bitkub_balance(bitkub_api_key, bitkub_api_secret, base_currency)
+                            received_coin = float(buy_response['result'].get('rec', 0.0))
+                            bot_managed_holding += received_coin
                             last_trade_type = 'BUY'
+                            print(f"Real backup buy SUCCESS. Bot now manages: {bot_managed_holding:.8f} {base_currency}.")
                         else:
-                            print("Real backup buy order failed, not updating holding amount.")
+                            print("Real backup buy order failed, not updating bot managed holding.")
 
                     # If current state is CASH but previous was HOLDING, and no primary sell signal
-                    elif derived_bot_state == "CASH" and previous_derived_bot_state == "HOLDING" and current_holding_amount > 0 and last_trade_type != 'SELL':
+                    elif derived_bot_state == "CASH" and previous_derived_bot_state == "HOLDING" and bot_managed_holding > 0 and last_trade_type != 'SELL':
                         print(f"!!! BACKUP SELL SIGNAL DETECTED !!! State changed from HOLDING to CASH without primary crossover.")
+                        order_rate = None
+                        if order_execution_type == 'limit':
+                            order_rate = current_bitkub_bid_price * (1 - max_slippage_percentage / 100)
+                            print(f"  Calculated backup sell limit rate with slippage: {order_rate:.{get_display_decimals(order_rate)}f}")
+                        
                         sell_response = place_sell_order_bitkub(
-                            bitkub_api_key, bitkub_api_secret, bitkub_symbol, current_holding_amount, current_bitkub_bid_price, signal_type="backup"
+                            bitkub_api_key, bitkub_api_secret, bitkub_symbol, bot_managed_holding, order_execution_type, order_rate, signal_type="backup"
                         )
                         if sell_response and sell_response.get('error') == 0:
-                            current_holding_amount = 0.0
+                            bot_managed_holding = 0.0
                             last_trade_type = 'SELL'
+                            print(f"Real backup sell SUCCESS. Bot now manages: {bot_managed_holding:.8f} {base_currency}.")
                         else:
-                            print("Real backup sell order failed, not updating holding amount.")
+                            print("Real backup sell order failed, not updating bot managed holding.")
 
                     # Update previous state for the next iteration
                     previous_derived_bot_state = derived_bot_state
@@ -718,12 +771,13 @@ def monitor_mas_on_candle_close():
             else:
                 print("No data or MAs to display for this update. Retrying in next cycle.")
 
-            # Refresh actual Bitkub balance to display
+            # Refresh actual Bitkub balance to display (overall account balance)
             current_thb_balance = get_bitkub_balance(bitkub_api_key, bitkub_api_secret, quote_currency)
             current_coin_balance = get_bitkub_balance(bitkub_api_key, bitkub_api_secret, base_currency)
 
             print(f"Current Bitkub {quote_currency} balance: {current_thb_balance:.2f}")
-            print(f"Current Bitkub {base_currency} balance: {current_coin_balance:.8f}")
+            print(f"Current Bitkub {base_currency} balance: {current_coin_balance:.8f} (Total account balance)")
+            print(f"Bot managed holding amount: {bot_managed_holding:.8f} {base_currency}")
             print(f"Last actual trade type: {last_trade_type}")
             print(f"Previous derived bot state for next cycle: {previous_derived_bot_state}")
 

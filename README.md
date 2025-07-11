@@ -12,7 +12,7 @@
 - จำลองการซื้อ/ขาย (ไม่มีการส่งคำสั่งจริง)
 - โหลดการตั้งค่าจาก `config.json` หรือสร้างแบบโต้ตอบ
 - ตรวจสอบตามช่วงเวลาที่กำหนด (เช่น 1 นาที, 1 ชั่วโมง, 1 วัน)
-- มีระบบ self-buy (เริ่มต้นถือเหรียญจำลอง)
+- มีระบบ self-buy
 
 ### ความต้องการ
 - Python 3.8 ขึ้นไป
@@ -31,7 +31,7 @@ pip install requests python-binance
 1. **โคลน repository**
    ```bash
    git clone <your-repo-url>
-   cd BitkubTrendTrader
+   cd CashBurnerBitkubTradingBot
    ```
 2. **ติดตั้ง dependencies**
    ```bash
@@ -57,15 +57,11 @@ python BitkubBot.py
 - **binance_symbol**: คู่เทรดบน Binance (เช่น `BTCUSDT`)
 - **position_size_thb**: จำนวนเงินบาทที่ใช้ต่อการเทรด
 - **trading_fee_percentage**: ค่าธรรมเนียมการเทรดเป็นเปอร์เซ็นต์ (เช่น 0.25 สำหรับ 0.25%)
-- **indicator_strategy**: เลือกกลยุทธ์อินดิเคเตอร์ (`Moving Average` หรือ `Supertrend`)
 - **indicator_settings**:
-    - ถ้าเลือก Moving Average: `fast_ma_period`, `slow_ma_period`, `indicator_type` (SMA, EMA, WMA)
-    - ถ้าเลือก Supertrend: `atr_period`, `multiplier`
+    - Moving Average: `fast_ma_period`, `slow_ma_period` (SMA, EMA, WMA)
 - **timeframe**: ช่วงเวลาแท่งเทียน (เช่น 1m, 1h, 1d)
-- **self_buy_enabled**: เริ่มต้นด้วยการถือเหรียญจำลอง
-- **self_buy_amount_coin**: จำนวนเหรียญที่จะเริ่มถือครองหากเปิดใช้งาน self-buy
-
-> **หมายเหตุ:** ยังไม่รองรับการใส่ API key, API secret ของ Bitkub เพื่อส่งคำสั่งซื้อขายจริง
+- **self_buy_enabled**: กรณีที่เริ่มใช้งานบอทหลังจากเกิดสัญญาณซื้อไปแล้ว ให้เปิดใช้ฟังชั่นก์นี้หากต้องการให้บอทขายเหรียญให้ตอนเกิดสัญญาณขาย
+- **self_buy_amount_coin**: จำนวนเหรียญที่เปิดใช้งาน self-buy
 
 > **อัปเดต:** เวอร์ชันนี้สามารถยิง order เทรดจริงใน Bitkub ได้ (ต้องใส่ API key/secret ของ Bitkub ใน config หรือไฟล์ที่กำหนด)
 

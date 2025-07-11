@@ -1,14 +1,84 @@
 import os
 import time
 import requests
-import json # New import for JSON handling
+import json
+import hmac
+import hashlib
 from binance.client import Client
 from datetime import datetime, timedelta
 
 # --- Configuration File Name ---
 CONFIG_FILE = 'config.json'
 
-# --- Helper Functions ---
+# --- Bitkub API Configuration ---
+BITKUB_API_HOST = 'https://api.bitkub.com'
+
+# --- Helper Functions for Bitkub API Calls ---
+def generate_bitkub_signature(api_secret, timestamp, method, path, body_string=""):
+    """Generates the HMAC SHA-256 signature for Bitkub API requests."""
+    payload_parts = [str(timestamp), method, path]
+    if method == 'POST':
+        payload_parts.append(body_string)
+    elif method == 'GET':
+        # For GET, query parameters are part of the path for signing
+        # Assuming path already includes query params if any
+        pass
+    
+    payload_string = ''.join(payload_parts)
+    return hmac.new(api_secret.encode('utf-8'), payload_string.encode('utf-8'), hashlib.sha256).hexdigest()
+
+def bitkub_api_call(api_key, api_secret, method, path, params=None, json_body=None):
+    """Makes a signed API call to Bitkub."""
+    try:
+        # Get server timestamp from Bitkub
+        timestamp_response = requests.get(f"{BITKUB_API_HOST}/api/v3/servertime", timeout=5)
+        timestamp_response.raise_for_status()
+        timestamp = timestamp_response.json()
+
+        headers = {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'X-BTK-TIMESTAMP': str(timestamp),
+            'X-BTK-APIKEY': api_key
+        }
+
+        request_url = f"{BITKUB_API_HOST}{path}"
+        body_string = ""
+
+        if method == 'GET':
+            if params:
+                query_string = requests.PreparedRequest().prepare_url(request_url, params).url.replace(request_url, "")
+                request_url = f"{request_url}{query_string}"
+                path_for_sign = f"{path}{query_string}" # Path for signing includes query string
+            else:
+                path_for_sign = path
+            signature = generate_bitkub_signature(api_secret, timestamp, method, path_for_sign)
+            headers['X-BTK-SIGN'] = signature
+            response = requests.request(method, request_url, headers=headers, timeout=10)
+        elif method == 'POST':
+            if json_body:
+                body_string = json.dumps(json_body)
+            signature = generate_bitkub_signature(api_secret, timestamp, method, path, body_string)
+            headers['X-BTK-SIGN'] = signature
+            response = requests.request(method, request_url, headers=headers, data=body_string, timeout=10)
+        else:
+            raise ValueError("Unsupported HTTP method for Bitkub API.")
+
+        response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
+        return response.json()
+
+    except requests.exceptions.RequestException as e:
+        print(f"Bitkub API Request Error ({method} {path}): {e}")
+        return {"error": -1, "message": str(e)} # Custom error format
+    except json.JSONDecodeError:
+        print(f"Bitkub API JSON Decode Error: Could not parse response from {request_url}")
+        return {"error": -2, "message": "Invalid JSON response"}
+    except Exception as e:
+        print(f"An unexpected error occurred during Bitkub API call: {e}")
+        return {"error": -3, "message": str(e)}
+
+
+# --- Helper Functions for MA Calculation ---
 def calculate_sma(prices, period):
     """Calculates the Simple Moving Average (SMA)."""
     if len(prices) < period:
@@ -191,87 +261,114 @@ def get_binance_price(client, symbol):
         print(f"Error fetching price for {symbol} from Binance: {e}")
         return None
 
-def get_bitkub_price(symbol):
-    """Fetches the current ticker price for a given symbol from Bitkub."""
+def get_bitkub_market_data(symbol):
+    """
+    Fetches current ticker information for a given symbol from Bitkub,
+    including last, lowestAsk, and highestBid prices.
+    """
     try:
         url = f"https://api.bitkub.com/api/market/ticker?sym={symbol}"
         response = requests.get(url, timeout=5)
         response.raise_for_status()
         data = response.json()
         
-        if symbol in data and 'last' in data[symbol]:
-            return float(data[symbol]['last'])
+        if symbol in data:
+            return {
+                'last': float(data[symbol].get('last')),
+                'lowestAsk': float(data[symbol].get('lowestAsk')),
+                'highestBid': float(data[symbol].get('highestBid'))
+            }
         else:
-            print(f"Error: Symbol '{symbol}' not found in Bitkub ticker response or 'last' price missing.")
+            print(f"Error: Symbol '{symbol}' not found in Bitkub ticker response.")
             return None
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching price for {symbol} from Bitkub API: {e}")
+        print(f"Error fetching market data for {symbol} from Bitkub API: {e}")
         return None
     except Exception as e:
-        print(f"An unexpected error occurred while fetching Bitkub price for {symbol}: {e}")
+        print(f"An unexpected error occurred while fetching Bitkub market data for {symbol}: {e}")
         return None
 
-def place_buy_order_bitkub_mock(bitkub_symbol, amount_thb, binance_client, binance_trading_pair_usdt, trading_fee_percentage, signal_type="primary"):
+def place_buy_order_bitkub(api_key, api_secret, bitkub_symbol_config, amount_thb, rate, signal_type="primary"):
     """
-    Mocks a buy order on Bitkub, calculating received coin amount based on Binance and Bitkub prices.
-
+    Places a buy order on Bitkub.
     Args:
-        bitkub_symbol (str): The trading pair on Bitkub (e.g., 'THB_HYPER').
+        api_key (str): Bitkub API Key.
+        api_secret (str): Bitkub API Secret.
+        bitkub_symbol_config (str): The trading pair from config (e.g., 'THB_OMNI').
         amount_thb (float): The amount of THB to spend.
-        binance_client (binance.client.Client): The initialized Binance client.
-        binance_trading_pair_usdt (str): The corresponding USDT pair on Binance (e.g., 'HYPERUSDT').
-        trading_fee_percentage (float): The trading fee as a decimal (e.g., 0.0025 for 0.25%).
+        rate (float): The price at which to place the limit order.
         signal_type (str): 'primary' or 'backup' to indicate the signal source.
-
     Returns:
-        float: The mock amount of coin received, or 0 if the order fails.
+        dict: The response from the Bitkub API.
     """
-    print(f"MOCK BUY ({signal_type.upper()} SIGNAL): Attempting to buy {bitkub_symbol} with {amount_thb} THB...")
+    # Convert THB_OMNI to omni_thb for API call
+    base_currency = bitkub_symbol_config.split('_')[1]
+    quote_currency = bitkub_symbol_config.split('_')[0]
+    api_symbol = f"{base_currency.lower()}_{quote_currency.lower()}"
 
-    usdt_thb_price = get_bitkub_price('THB_USDT') 
-    coin_usdt_price = get_binance_price(binance_client, binance_trading_pair_usdt)
+    print(f"REAL BUY ({signal_type.upper()} SIGNAL): Attempting to buy {bitkub_symbol_config} with {amount_thb} THB at rate {rate}...")
+    path = '/api/v3/market/place-bid'
+    json_body = {
+        'sym': api_symbol,
+        'amt': float(f'{amount_thb:.{get_display_decimals(amount_thb)}f}'), # Format to appropriate decimals
+        'rat': float(f'{rate:.{get_display_decimals(rate)}f}'), # Format to appropriate decimals
+        'typ': 'limit'
+    }
+    response = bitkub_api_call(api_key, api_secret, 'POST', path, json_body=json_body)
+    if response and response.get('error') == 0:
+        print(f"REAL BUY SUCCESS: Order ID {response['result'].get('id')}, received approx. {response['result'].get('rec', 'N/A')} {base_currency}.")
+    else:
+        print(f"REAL BUY FAILED: {response.get('message', 'Unknown error')}. Error code: {response.get('error', 'N/A')}")
+    return response
 
-    if usdt_thb_price is None or coin_usdt_price is None or coin_usdt_price == 0:
-        print("MOCK BUY FAILED: Could not get necessary prices for calculation (USDT/THB from Bitkub or Coin/USDT from Binance).")
-        return 0
-
-    amount_usdt = amount_thb / usdt_thb_price
-    coin_amount_before_fees = amount_usdt / coin_usdt_price
-    coin_amount_received = coin_amount_before_fees * (1 - trading_fee_percentage)
-
-    print(f"MOCK BUY SUCCESS: Spent {amount_thb} THB, received {coin_amount_received:.8f} {bitkub_symbol.split('_')[1]} (after {trading_fee_percentage*100:.2f}% fee).")
-    return coin_amount_received
-
-def place_sell_order_bitkub_mock(bitkub_symbol, coin_amount, binance_client, binance_trading_pair_usdt, trading_fee_percentage, signal_type="primary"):
+def place_sell_order_bitkub(api_key, api_secret, bitkub_symbol_config, coin_amount, rate, signal_type="primary"):
     """
-    Mocks a sell order on Bitkub.
-
+    Places a sell order on Bitkub.
     Args:
-        bitkub_symbol (str): The trading pair on Bitkub (e.g., 'THB_HYPER').
+        api_key (str): Bitkub API Key.
+        api_secret (str): Bitkub API Secret.
+        bitkub_symbol_config (str): The trading pair from config (e.g., 'THB_OMNI').
         coin_amount (float): The amount of coin to sell.
-        binance_client (binance.client.Client): The initialized Binance client.
-        binance_trading_pair_usdt (str): The corresponding USDT pair on Binance (e.g., 'HYPERUSDT').
-        trading_fee_percentage (float): The trading fee as a decimal (e.g., 0.0025 for 0.25%).
+        rate (float): The price at which to place the limit order.
         signal_type (str): 'primary' or 'backup' to indicate the signal source.
-
     Returns:
-        bool: True if the mock order is successful, False otherwise.
+        dict: The response from the Bitkub API.
     """
-    print(f"MOCK SELL ({signal_type.upper()} SIGNAL): Attempting to sell {coin_amount:.8f} {bitkub_symbol.split('_')[1]}...")
+    # Convert THB_OMNI to omni_thb for API call
+    base_currency = bitkub_symbol_config.split('_')[1]
+    quote_currency = bitkub_symbol_config.split('_')[0]
+    api_symbol = f"{base_currency.lower()}_{quote_currency.lower()}"
 
-    usdt_thb_price = get_bitkub_price('THB_USDT')
-    coin_usdt_price = get_binance_price(binance_client, binance_trading_pair_usdt)
+    print(f"REAL SELL ({signal_type.upper()} SIGNAL): Attempting to sell {coin_amount:.8f} {base_currency} at rate {rate}...")
+    path = '/api/v3/market/place-ask'
+    json_body = {
+        'sym': api_symbol,
+        'amt': float(f'{coin_amount:.8f}'), # Coin amount typically needs more precision
+        'rat': float(f'{rate:.{get_display_decimals(rate)}f}'),
+        'typ': 'limit'
+    }
+    response = bitkub_api_call(api_key, api_secret, 'POST', path, json_body=json_body)
+    if response and response.get('error') == 0:
+        print(f"REAL SELL SUCCESS: Order ID {response['result'].get('id')}, received approx. {response['result'].get('rec', 'N/A')} {quote_currency}.")
+    else:
+        print(f"REAL SELL FAILED: {response.get('message', 'Unknown error')}. Error code: {response.get('error', 'N/A')}")
+    return response
 
-    if usdt_thb_price is None or coin_usdt_price is None:
-        print("MOCK SELL (REPORTING) FAILED: Could not get necessary prices for calculation (USDT/THB from Bitkub or Coin/USDT from Binance).")
-        return False
-
-    mock_thb_received_before_fees_usdt = coin_amount * coin_usdt_price
-    mock_thb_received_before_fees_thb = mock_thb_received_before_fees_usdt * usdt_thb_price
-    mock_thb_received_after_fees = mock_thb_received_before_fees_thb * (1 - trading_fee_percentage)
-
-    print(f"MOCK SELL SUCCESS: Sold {coin_amount:.8f} {bitkub_symbol.split('_')[1]}, would receive approx. {mock_thb_received_after_fees:.2f} THB (after {trading_fee_percentage*100:.2f}% fee).")
-    return True
+def get_bitkub_balance(api_key, api_secret, currency):
+    """Fetches the available balance for a specific currency from Bitkub."""
+    path = '/api/v3/market/balances'
+    response = bitkub_api_call(api_key, api_secret, 'POST', path) # Balances endpoint is POST with no body/params
+    
+    if response and response.get('error') == 0:
+        balances = response['result']
+        if currency in balances:
+            return float(balances[currency]['available'])
+        else:
+            print(f"Currency '{currency}' not found in Bitkub balances.")
+            return 0.0
+    else:
+        print(f"Failed to fetch Bitkub balances: {response.get('message', 'Unknown error')}. Error code: {response.get('error', 'N/A')}")
+        return 0.0
 
 def load_config():
     """Loads configuration from config.json or prompts user to create it."""
@@ -290,12 +387,22 @@ def get_user_input_and_create_config():
 
     print("\nPlease provide the following configuration details:")
 
-    config['bitkub_symbol'] = input("Enter Coin to trade in Bitkub format (e.g., THB_HYPER): ").strip().upper()
-    config['binance_symbol'] = input("Enter Coin to monitor in Binance format (e.g., HYPERUSDT): ").strip().upper()
+    config['bitkub_api_key'] = input("Enter your Bitkub API Key: ").strip()
+    config['bitkub_api_secret'] = input("Enter your Bitkub API Secret: ").strip()
+
+    config['binance_api_key'] = input("Enter your Binance API Key (leave empty if not using): ").strip()
+    config['binance_api_secret'] = input("Enter your Binance API Secret (leave empty if not using): ").strip()
+
+    config['bitkub_symbol'] = input("Enter Coin to trade in Bitkub format (e.g., THB_BTC): ").strip().upper()
+    # For Binance, the symbol is usually BASEASSET+QUOTEASSET (e.g., BTCUSDT)
+    # If the Bitkub symbol is THB_BTC, the Binance equivalent for historical data might be BTCUSDT
+    # User needs to specify the correct Binance pair for the base asset against USDT or a major stablecoin
+    config['binance_symbol'] = input(f"Enter corresponding Binance symbol for historical data (e.g., {config['bitkub_symbol'].split('_')[1]}USDT): ").strip().upper()
+
 
     while True:
         try:
-            config['position_size_thb'] = float(input("Enter default position size in THB (e.g., 100): "))
+            config['position_size_thb'] = float(input("Enter default position size in THB (e.g., 1000): "))
             if config['position_size_thb'] <= 0:
                 raise ValueError("Position size must be positive.")
             break
@@ -332,7 +439,7 @@ def get_user_input_and_create_config():
             print(f"Invalid input: {e}. Please enter a positive integer.")
 
     while True:
-        indicator_type = input("Enter type of indicator (SMA, EMA, WMA, default SMA): ").strip().upper() or "SMA"
+        indicator_type = input("Enter type of indicator (SMA, EMA, WMA, default EMA): ").strip().upper() or "EMA"
         if indicator_type in ['SMA', 'EMA', 'WMA']:
             indicator_settings['indicator_type'] = indicator_type
             break
@@ -341,16 +448,16 @@ def get_user_input_and_create_config():
     config['indicator_settings'] = indicator_settings
 
     while True:
-        timeframe = input("Enter timeframe (e.g., 1s, 1m, 1h, 1d, default 1d for production, 1s for testing): ").strip() or "1d"
+        timeframe = input("Enter timeframe (e.g., 1s, 1m, 1h, 1d, default 1w for production, 1s for testing): ").strip() or "1w"
         # Basic validation for common intervals, can be expanded
         if timeframe in ['1s', '1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M']:
             config['timeframe'] = timeframe
             break
         else:
-            print("Invalid timeframe. Please enter a valid interval (e.g., 1s, 1m, 1d).")
+            print("Invalid timeframe. Please enter a valid interval (e.g., 1s, 1m, 1d, 1w).")
 
     while True:
-        self_buy_enabled_str = input("Enable self-buy at startup? (true/false, default false): ").strip().lower() or "false"
+        self_buy_enabled_str = input("Enable initial buy at startup (for testing/starting with a position)? (true/false, default false): ").strip().lower() or "false"
         if self_buy_enabled_str in ['true', 'false']:
             config['self_buy_enabled'] = self_buy_enabled_str == 'true'
             break
@@ -361,9 +468,9 @@ def get_user_input_and_create_config():
     if config['self_buy_enabled']:
         while True:
             try:
-                config['self_buy_amount_coin'] = float(input("Enter self-buy amount in coin unit (e.g., 0.001): "))
+                config['self_buy_amount_coin'] = float(input("Enter initial buy amount in coin unit (e.g., 0.001 BTC or 100 HYPER): "))
                 if config['self_buy_amount_coin'] < 0:
-                    raise ValueError("Self-buy amount cannot be negative.")
+                    raise ValueError("Initial buy amount cannot be negative.")
                 break
             except ValueError as e:
                 print(f"Invalid input: {e}. Please enter a non-negative number.")
@@ -376,13 +483,18 @@ def get_user_input_and_create_config():
 def monitor_mas_on_candle_close():
     """
     Monitors cryptocurrency price data and calculates MAs, updating after each candle close.
-    Detects MA crossovers, prints signals, reports derived bot state, and performs mock trades.
+    Detects MA crossovers, prints signals, reports derived bot state, and performs real trades on Bitkub.
     Settings are loaded from config.json.
     """
     config = load_config()
 
+    bitkub_api_key = config['bitkub_api_key']
+    bitkub_api_secret = config['bitkub_api_secret']
+    binance_api_key = config['binance_api_key']
+    binance_api_secret = config['binance_api_secret']
+
     binance_symbol = config['binance_symbol']
-    bitkub_symbol = config['bitkub_symbol']
+    bitkub_symbol = config['bitkub_symbol'] # e.g., THB_OMNI
     position_size_thb = config['position_size_thb']
     trading_fee_percentage = config['trading_fee_percentage']
     fast_ma_period = config['indicator_settings']['fast_ma_period']
@@ -414,21 +526,38 @@ def monitor_mas_on_candle_close():
     print(f"Starting {ma_type} crossover monitoring for {binance_symbol} at {interval} interval. Press Ctrl+C to stop.")
 
     # Initialize Binance client
-    binance_client = Client(os.environ.get('BINANCE_API_KEY', ''), os.environ.get('BINANCE_API_SECRET', ''))
+    binance_client = Client(binance_api_key, binance_api_secret)
 
-    # Mock trading state variables
+    # Trading state variables
+    base_currency = bitkub_symbol.split('_')[1] # e.g., OMNI from THB_OMNI
+    quote_currency = bitkub_symbol.split('_')[0] # e.g., THB from THB_OMNI
+
     current_holding_amount = 0.0
-    last_trade_type = None
-    previous_derived_bot_state = "UNKNOWN"
+    last_trade_type = None # 'BUY', 'SELL', or None
 
-    # Apply self-buy at startup if enabled
+    # Get initial THB and Coin balances from Bitkub
+    initial_thb_balance = get_bitkub_balance(bitkub_api_key, bitkub_api_secret, quote_currency)
+    initial_coin_balance = get_bitkub_balance(bitkub_api_key, bitkub_api_secret, base_currency)
+
+    print(f"Initial Bitkub {quote_currency} balance: {initial_thb_balance:.2f}")
+    print(f"Initial Bitkub {base_currency} balance: {initial_coin_balance:.8f}")
+
+    # Set initial holding based on actual balance or self-buy config
     if self_buy_enabled and self_buy_amount_coin > 0:
         current_holding_amount = self_buy_amount_coin
         last_trade_type = 'BUY'
-        print(f"Self-buy enabled: Bot starts with {current_holding_amount:.8f} {bitkub_symbol.split('_')[1]} (mock holding).")
+        print(f"Initial buy enabled: Bot starts with {current_holding_amount:.8f} {base_currency} (simulated).")
+    elif initial_coin_balance > 0:
+        current_holding_amount = initial_coin_balance
+        last_trade_type = 'BUY' # Assume if we have coin, we are in a 'bought' state
+        print(f"Initial holding detected from Bitkub balance: {current_holding_amount:.8f} {base_currency}.")
     else:
-        print(f"Initial mock holding amount: {current_holding_amount:.8f} {bitkub_symbol.split('_')[1]}")
+        current_holding_amount = 0.0
+        last_trade_type = 'SELL' # Assume if no coin, we are in a 'sold' state (cash)
+        print(f"Initial holding: {current_holding_amount:.8f} {base_currency} (cash).")
     
+    previous_derived_bot_state = "UNKNOWN" # Will be updated after first MA calculation
+
     print(f"Initial last trade type: {last_trade_type}")
     print(f"Initial previous derived bot state: {previous_derived_bot_state}")
 
@@ -471,9 +600,9 @@ def monitor_mas_on_candle_close():
                 if len(data['close_prices']) >= 2:
                     latest_confirmed_price = data['close_prices'][-2]
                     decimals = get_display_decimals(latest_confirmed_price)
-                    print(f"Latest confirmed close price: {latest_confirmed_price:.{decimals}f}")
+                    print(f"Latest confirmed close price ({binance_symbol}): {latest_confirmed_price:.{decimals}f}")
                 else:
-                    print("Not enough close price data for latest confirmed price.")
+                    print(f"Not enough close price data for latest confirmed price for {binance_symbol}.")
 
                 for period in [fast_ma_period, slow_ma_period]:
                     current_ma = current_confirmed_mas.get(period)
@@ -502,72 +631,83 @@ def monitor_mas_on_candle_close():
                         derived_bot_state = "CASH"
                     print(f"Current derived bot state: {derived_bot_state}")
 
-                    # Flag to check if a primary signal was triggered in this cycle
-                    primary_signal_triggered = False
+                    # Fetch current Bitkub market data for actual trading
+                    bitkub_market_data = get_bitkub_market_data(bitkub_symbol) 
+
+                    if bitkub_market_data is None or bitkub_market_data.get('lowestAsk') is None or bitkub_market_data.get('highestBid') is None:
+                        print("Could not fetch current Bitkub ask/bid prices. Skipping trade actions this cycle.")
+                        continue # Skip trading actions if prices aren't available
+
+                    current_bitkub_ask_price = bitkub_market_data['lowestAsk']
+                    current_bitkub_bid_price = bitkub_market_data['highestBid']
 
                     # Check for Primary Buy Signal
                     if fast_ma_current > slow_ma_current and fast_ma_previous <= slow_ma_previous:
                         print(f"!!! PRIMARY BUY SIGNAL DETECTED !!! {fast_ma_period}-{interval} {ma_type} crossed ABOVE {slow_ma_period}-{interval} {ma_type}.")
-                        primary_signal_triggered = True
+                        # Check if we are not already holding (or if last trade was a sell)
                         if last_trade_type != 'BUY':
-                            mock_amount_received = place_buy_order_bitkub_mock(
-                                bitkub_symbol, position_size_thb, binance_client, binance_symbol, trading_fee_percentage, signal_type="primary"
+                            # Attempt to place a real buy order on Bitkub
+                            buy_response = place_buy_order_bitkub(
+                                bitkub_api_key, bitkub_api_secret, bitkub_symbol, position_size_thb, current_bitkub_ask_price, signal_type="primary"
                             )
-                            if mock_amount_received > 0:
-                                current_holding_amount = mock_amount_received
+                            if buy_response and buy_response.get('error') == 0:
+                                # Update holding amount and last trade type based on successful order
+                                # For simplicity, assuming full fill immediately. In real bot, you'd monitor order status.
+                                current_holding_amount = get_bitkub_balance(bitkub_api_key, bitkub_api_secret, base_currency)
                                 last_trade_type = 'BUY'
                             else:
-                                print("Mock primary buy order failed, not updating holding amount.")
+                                print("Real primary buy order failed, not updating holding amount.")
                         else:
-                            print("Already in a 'HOLDING' state (from previous buy), skipping primary mock buy order.")
+                            print("Already in a 'HOLDING' state (from previous buy), skipping primary buy order.")
 
                     # Check for Primary Sell Signal
                     elif fast_ma_current < slow_ma_current and fast_ma_previous >= slow_ma_previous:
                         print(f"!!! PRIMARY SELL SIGNAL DETECTED !!! {fast_ma_period}-{interval} {ma_type} crossed BELOW {slow_ma_period}-{interval} {ma_type}.")
-                        primary_signal_triggered = True
+                        # Check if we are currently holding coins (or if last trade was a buy)
                         if current_holding_amount > 0 and last_trade_type != 'SELL':
-                            mock_sell_success = place_sell_order_bitkub_mock(
-                                bitkub_symbol, current_holding_amount, binance_client, binance_symbol, trading_fee_percentage, signal_type="primary"
+                            # Attempt to place a real sell order on Bitkub
+                            sell_response = place_sell_order_bitkub(
+                                bitkub_api_key, bitkub_api_secret, bitkub_symbol, current_holding_amount, current_bitkub_bid_price, signal_type="primary"
                             )
-                            if mock_sell_success:
-                                current_holding_amount = 0.0
+                            if sell_response and sell_response.get('error') == 0:
+                                # Update holding amount and last trade type based on successful order
+                                current_holding_amount = 0.0 # Assuming full sell
                                 last_trade_type = 'SELL'
                             else:
-                                print("Mock primary sell order failed, not updating holding amount.")
+                                print("Real primary sell order failed, not updating holding amount.")
                         else:
-                            print("Not holding any coins or already in 'CASH' state (from previous sell), skipping primary mock sell order.")
+                            print("Not holding any coins or already in 'CASH' state (from previous sell), skipping primary sell order.")
                     else:
                         print("No primary crossover detected in this update.")
 
-                    # --- Backup Signal Logic ---
-                    if not primary_signal_triggered and previous_derived_bot_state != "UNKNOWN":
-                        if derived_bot_state == "HOLDING" and previous_derived_bot_state == "CASH":
-                            print(f"!!! BACKUP BUY SIGNAL DETECTED !!! State changed from CASH to HOLDING without primary crossover.")
-                            if last_trade_type != 'BUY':
-                                mock_amount_received = place_buy_order_bitkub_mock(
-                                    bitkub_symbol, position_size_thb, binance_client, binance_symbol, trading_fee_percentage, signal_type="backup"
-                                )
-                                if mock_amount_received > 0:
-                                    current_holding_amount = mock_amount_received
-                                    last_trade_type = 'BUY'
-                                else:
-                                    print("Mock backup buy order failed, not updating holding amount.")
-                            else:
-                                print("Already in a 'HOLDING' state (from previous buy), skipping backup mock buy order.")
+                    # --- Backup Signal Logic (if no primary signal triggered) ---
+                    # This logic ensures the bot attempts to correct its state if it somehow gets out of sync
+                    # with the MA crossover state without a direct crossover signal.
+                    # This might happen if the bot was stopped and restarted, or if there was a rapid price movement.
+                    
+                    # If current state is HOLDING but previous was CASH, and no primary buy signal
+                    if derived_bot_state == "HOLDING" and previous_derived_bot_state == "CASH" and last_trade_type != 'BUY':
+                        print(f"!!! BACKUP BUY SIGNAL DETECTED !!! State changed from CASH to HOLDING without primary crossover.")
+                        buy_response = place_buy_order_bitkub(
+                            bitkub_api_key, bitkub_api_secret, bitkub_symbol, position_size_thb, current_bitkub_ask_price, signal_type="backup"
+                        )
+                        if buy_response and buy_response.get('error') == 0:
+                            current_holding_amount = get_bitkub_balance(bitkub_api_key, bitkub_api_secret, base_currency)
+                            last_trade_type = 'BUY'
+                        else:
+                            print("Real backup buy order failed, not updating holding amount.")
 
-                        elif derived_bot_state == "CASH" and previous_derived_bot_state == "HOLDING":
-                            print(f"!!! BACKUP SELL SIGNAL DETECTED !!! State changed from HOLDING to CASH without primary crossover.")
-                            if current_holding_amount > 0 and last_trade_type != 'SELL':
-                                mock_sell_success = place_sell_order_bitkub_mock(
-                                    bitkub_symbol, current_holding_amount, binance_client, binance_symbol, trading_fee_percentage, signal_type="backup"
-                                )
-                                if mock_sell_success:
-                                    current_holding_amount = 0.0
-                                    last_trade_type = 'SELL'
-                                else:
-                                    print("Mock backup sell order failed, not updating holding amount.")
-                            else:
-                                print("Not holding any coins or already in 'CASH' state (from previous sell), skipping backup mock sell order.")
+                    # If current state is CASH but previous was HOLDING, and no primary sell signal
+                    elif derived_bot_state == "CASH" and previous_derived_bot_state == "HOLDING" and current_holding_amount > 0 and last_trade_type != 'SELL':
+                        print(f"!!! BACKUP SELL SIGNAL DETECTED !!! State changed from HOLDING to CASH without primary crossover.")
+                        sell_response = place_sell_order_bitkub(
+                            bitkub_api_key, bitkub_api_secret, bitkub_symbol, current_holding_amount, current_bitkub_bid_price, signal_type="backup"
+                        )
+                        if sell_response and sell_response.get('error') == 0:
+                            current_holding_amount = 0.0
+                            last_trade_type = 'SELL'
+                        else:
+                            print("Real backup sell order failed, not updating holding amount.")
 
                     # Update previous state for the next iteration
                     previous_derived_bot_state = derived_bot_state
@@ -578,11 +718,16 @@ def monitor_mas_on_candle_close():
             else:
                 print("No data or MAs to display for this update. Retrying in next cycle.")
 
-            print(f"Current mock holding amount: {current_holding_amount:.8f} {bitkub_symbol.split('_')[1]}")
-            print(f"Last mock trade type: {last_trade_type}")
+            # Refresh actual Bitkub balance to display
+            current_thb_balance = get_bitkub_balance(bitkub_api_key, bitkub_api_secret, quote_currency)
+            current_coin_balance = get_bitkub_balance(bitkub_api_key, bitkub_api_secret, base_currency)
+
+            print(f"Current Bitkub {quote_currency} balance: {current_thb_balance:.2f}")
+            print(f"Current Bitkub {base_currency} balance: {current_coin_balance:.8f}")
+            print(f"Last actual trade type: {last_trade_type}")
             print(f"Previous derived bot state for next cycle: {previous_derived_bot_state}")
 
-            time.sleep(0.1)
+            time.sleep(0.1) # Small delay before checking for the next candle close
 
         except Exception as e:
             print(f"An error occurred in monitoring loop: {e}. Retrying in 5 seconds...")

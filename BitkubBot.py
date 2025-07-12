@@ -1,19 +1,36 @@
 import os
-import time
+import time # Correctly import the time module
 import requests
 import json
 import hmac
 import hashlib
 from binance.client import Client
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as datetime_time # Alias datetime.time to avoid conflict
+import pytz # Import pytz for timezone handling
 
 # --- Configuration File Name ---
 CONFIG_FILE = 'config.json'
 
 # --- Bitkub API Configuration ---
 BITKUB_API_HOST = 'https://api.bitkub.com'
+BINANCE_API_HOST = 'https://api.binance.com' # Added for server time endpoint
 
-# --- Helper Functions for Bitkub API Calls ---
+# --- Helper Functions for API Calls ---
+def get_binance_server_time_utc():
+    """Fetches the current server time from Binance API and returns it as a UTC datetime object."""
+    try:
+        response = requests.get(f"{BINANCE_API_HOST}/api/v3/time", timeout=5)
+        response.raise_for_status()
+        server_time_ms = response.json()['serverTime']
+        # Convert milliseconds to seconds and then to datetime object in UTC
+        return datetime.fromtimestamp(server_time_ms / 1000, tz=pytz.utc)
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching Binance server time: {e}")
+        return None
+    except Exception as e:
+        print(f"An unexpected error occurred while fetching Binance server time: {e}")
+        return None
+
 def generate_bitkub_signature(api_secret, timestamp, method, path, body_string=""):
     """Generates the HMAC SHA-256 signature for Bitkub API requests."""
     payload_parts = [str(timestamp), method, path]
@@ -510,6 +527,14 @@ def get_user_input_and_create_config():
     print(f"Configuration saved to {CONFIG_FILE}.")
     return config
 
+def format_seconds_to_hms(seconds):
+    """Converts a duration in seconds to HH:MM:SS format."""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    remaining_seconds = int(seconds % 60)
+    return f"{hours:02}:{minutes:02}:{remaining_seconds:02}"
+
+
 def monitor_mas_on_candle_close():
     """
     Monitors cryptocurrency price data and calculates MAs, updating after each candle close.
@@ -567,6 +592,12 @@ def monitor_mas_on_candle_close():
     bot_managed_holding = 0.0 # Amount of coin managed by the bot strategy
     last_trade_type = None # 'BUY', 'SELL', or None
 
+    # Counters for intermediate checks
+    daily_intermediate_check_count = 0
+    weekly_intermediate_check_count = 0 
+    monthly_intermediate_check_count = 0 
+    threed_intermediate_check_count = 0 
+
     # Get initial THB and Coin balances from Bitkub (for display purposes only)
     initial_thb_balance = get_bitkub_balance(bitkub_api_key, bitkub_api_secret, quote_currency)
     initial_coin_balance = get_bitkub_balance(bitkub_api_key, bitkub_api_secret, base_currency)
@@ -593,28 +624,168 @@ def monitor_mas_on_candle_close():
 
     while True:
         try:
-            current_unix_ms = int(time.time() * 1000)
-            
-            # Special handling for '1m' timeframe update interval
-            if interval == '1m':
-                wait_time_seconds = 10 # Update every 10 seconds for 1m timeframe
-                print(f"Waiting {wait_time_seconds:.2f} seconds for next update (1m timeframe specific)...")
+            binance_server_time_utc = get_binance_server_time_utc()
+            if binance_server_time_utc is None:
+                print("Could not get Binance server time. Retrying in 5 seconds...")
+                time.sleep(5)
+                continue
+
+            # Optimized update interval logic for specific timeframes
+            wait_time_seconds = 0 # Default to no extra wait, let candle close logic handle it
+
+            if interval in ['1d', '1w', '1M', '3d']: 
+                target_time_utc = None
+                current_intermediate_check_count = 0 # Initialize for the current interval
+                
+                if interval == '1d':
+                    # Target update time: 00:00:05 AM GMT (07:00:05 AM GMT+7)
+                    target_time_utc = binance_server_time_utc.replace(hour=0, minute=0, second=5, microsecond=0)
+                    if binance_server_time_utc >= target_time_utc:
+                        target_time_utc += timedelta(days=1)
+                    current_intermediate_check_count = daily_intermediate_check_count
+
+                elif interval == '1w':
+                    # Target update time: Monday 00:00:05 AM GMT (07:00:05 AM GMT+7)
+                    days_until_monday = (0 - binance_server_time_utc.weekday() + 7) % 7
+                    target_time_utc = (binance_server_time_utc + timedelta(days=days_until_monday)).replace(hour=0, minute=0, second=5, microsecond=0)
+                    if binance_server_time_utc.weekday() == 0 and binance_server_time_utc >= target_time_utc:
+                        target_time_utc += timedelta(weeks=1)
+                    current_intermediate_check_count = weekly_intermediate_check_count
+
+                elif interval == '1M':
+                    # Target update time: 1st of the month 00:00:05 AM GMT (07:00:05 AM GMT+7)
+                    target_time_utc = binance_server_time_utc.replace(day=1, hour=0, minute=0, second=5, microsecond=0)
+                    if binance_server_time_utc >= target_time_utc:
+                        if binance_server_time_utc.month == 12:
+                            target_time_utc = target_time_utc.replace(year=binance_server_time_utc.year + 1, month=1, day=1)
+                        else:
+                            target_time_utc = target_time_utc.replace(month=binance_server_time_utc.month + 1, day=1)
+                    current_intermediate_check_count = monthly_intermediate_check_count
+                
+                elif interval == '3d':
+                    # Target update time: every 3 days at 00:00:05 AM GMT (07:00:05 AM GMT+7)
+                    # Use a fixed epoch to ensure consistent 3-day cycles
+                    epoch = datetime(2000, 1, 1, 0, 0, 5, tzinfo=pytz.utc)
+                    time_since_epoch = binance_server_time_utc - epoch
+                    
+                    # Calculate how many full 3-day periods have passed
+                    total_days_since_epoch = time_since_epoch.days
+                    days_into_cycle = total_days_since_epoch % 3
+                    
+                    # Calculate days to add to reach the next 3-day boundary
+                    days_to_add = (3 - days_into_cycle) % 3
+                    
+                    target_date = binance_server_time_utc.date() + timedelta(days=days_to_add)
+                    target_time_utc = datetime.combine(target_date, datetime_time(0, 0, 5), tzinfo=pytz.utc) # Use datetime_time
+                    
+                    # If the target time for today has already passed, set for the next 3-day cycle
+                    if binance_server_time_utc >= target_time_utc:
+                        target_time_utc += timedelta(days=3)
+                    current_intermediate_check_count = threed_intermediate_check_count
+
+
+                time_to_wait_seconds = (target_time_utc - binance_server_time_utc).total_seconds()
+                
+                # Add 5-minute intermediate checks, limited to first 5 for these timeframes
+                if current_intermediate_check_count < 5 and time_to_wait_seconds > 300: # If more than 5 minutes until next update and limit not reached
+                    print(f"\n--- Intermediate Check #{current_intermediate_check_count + 1} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ({interval} interval) ---")
+                    print(f"Waiting {format_seconds_to_hms(time_to_wait_seconds)} for next {interval} update. Fetching live data for check...")
+                    
+                    # Fetch and print live data during intermediate check
+                    data = get_crypto_data_and_mas(binance_symbol, interval, [fast_ma_period, slow_ma_period], fetch_limit, binance_client, ma_type)
+                    current_confirmed_mas_check = data.get('current_confirmed_mas', {})
+                    previous_confirmed_mas_check = data.get('previous_confirmed_mas', {}) # Also get previous for report
+
+                    if data['close_prices'] and len(data['close_prices']) >= 2:
+                        latest_confirmed_price_check = data['close_prices'][-2]
+                        decimals = get_display_decimals(latest_confirmed_price_check)
+                        print(f"Latest confirmed close price ({binance_symbol}): {latest_confirmed_price_check:.{decimals}f}")
+                    else:
+                        print(f"Not enough close price data for latest confirmed price for {binance_symbol}.")
+
+                    for period in [fast_ma_period, slow_ma_period]:
+                        current_ma_check = current_confirmed_mas_check.get(period)
+                        previous_ma_check = previous_confirmed_mas_check.get(period)
+                        
+                        current_ma_decimals = get_display_decimals(current_ma_check)
+                        previous_ma_decimals = get_display_decimals(previous_ma_check)
+
+                        if current_ma_check is not None:
+                            print(f"  {period}-{interval} {ma_type} (Current Confirmed): {current_ma_check:.{current_ma_decimals}f}")
+                        if previous_ma_check is not None:
+                            print(f"  {period}-{interval} {ma_type} (Previous Confirmed): {previous_ma_check:.{previous_ma_decimals}f}")
+
+                    # Determine current derived bot state for intermediate check display
+                    derived_bot_state_check = "UNKNOWN"
+                    if all(ma is not None for ma in [current_confirmed_mas_check.get(fast_ma_period), current_confirmed_mas_check.get(slow_ma_period)]):
+                        if current_confirmed_mas_check.get(fast_ma_period) > current_confirmed_mas_check.get(slow_ma_period):
+                            derived_bot_state_check = "HOLDING"
+                        else:
+                            derived_bot_state_check = "CASH"
+                    print(f"Current derived bot state: {derived_bot_state_check}")
+                    
+                    bitkub_market_data_check = get_bitkub_market_data(bitkub_symbol)
+                    if bitkub_market_data_check:
+                        print(f"  Bitkub Ask: {bitkub_market_data_check['lowestAsk']:.{get_display_decimals(bitkub_market_data_check['lowestAsk'])}f}, Bid: {bitkub_market_data_check['highestBid']:.{get_display_decimals(bitkub_market_data_check['highestBid'])}f}")
+
+                    # Also report bot's managed holding and last trade type
+                    print(f"Bot managed holding amount: {bot_managed_holding:.8f} {base_currency}")
+                    print(f"Last actual trade type: {last_trade_type}")
+                    print(f"Previous derived bot state for next cycle: {previous_derived_bot_state}") # This is the state from the *last full update*
+
+                    # Increment the correct counter
+                    if interval == '1d':
+                        daily_intermediate_check_count += 1
+                    elif interval == '1w':
+                        weekly_intermediate_check_count += 1
+                    elif interval == '1M':
+                        monthly_intermediate_check_count += 1
+                    elif interval == '3d':
+                        threed_intermediate_check_count += 1
+
+                    time.sleep(300) # Sleep for 5 minutes
+                    continue # Re-evaluate time_to_wait_seconds in next loop iteration
+                else:
+                    # Once 5 intermediate checks are done, or if time_to_wait_seconds is less than 5 minutes
+                    print(f"Waiting {format_seconds_to_hms(time_to_wait_seconds)} for next {interval} update...")
+                    time.sleep(time_to_wait_seconds)
+
+            elif interval == '1m':
+                wait_time_seconds = 10
+            elif interval == '3m':
+                wait_time_seconds = 20
+            elif interval == '5m':
+                wait_time_seconds = 30
+            elif interval == '15m':
+                wait_time_seconds = 60
+            elif interval == '30m':
+                wait_time_seconds = 60
+            elif interval == '1h':
+                wait_time_seconds = 5 * 60 # 5 minutes
+            elif interval in ['2h', '4h', '6h', '8h', '12h']: # Group these for 10-minute updates
+                wait_time_seconds = 10 * 60 # 10 minutes
+
+            if wait_time_seconds > 0:
+                print(f"Waiting {format_seconds_to_hms(wait_time_seconds)} for next update ({interval} timeframe specific)...")
                 time.sleep(wait_time_seconds)
             else:
-                # Original logic for other timeframes
+                # Original logic for other timeframes (wait until candle closes)
+                # This block will only be hit if interval is not '1d', '1w', '1M', '3d' and not one of the custom intervals
+                # Calculate based on Binance server time
+                current_unix_ms_binance = int(binance_server_time_utc.timestamp() * 1000)
                 interval_duration_ms = duration_sec * 1000
-                current_interval_start_ms = (current_unix_ms // interval_duration_ms) * interval_duration_ms
+                current_interval_start_ms = (current_unix_ms_binance // interval_duration_ms) * interval_duration_ms
                 expected_current_candle_close_ms = current_interval_start_ms + interval_duration_ms - 1
                 next_candle_close_time_ms = expected_current_candle_close_ms + interval_duration_ms
-                time_to_wait_ms = next_candle_close_time_ms - current_unix_ms
+                time_to_wait_ms = next_candle_close_time_ms - current_unix_ms_binance
 
                 if time_to_wait_ms > 0:
-                    print(f"Waiting {time_to_wait_ms / 1000:.2f} seconds for the next {interval} candle to close...")
+                    print(f"Waiting {format_seconds_to_hms(time_to_wait_ms / 1000)} for the next {interval} candle to close...")
                     time.sleep(time_to_wait_ms / 1000)
                 else:
                     print(f"Already past expected {interval} candle close time, fetching immediately.")
 
-            # Now that the candle should have closed (or 10 seconds passed for 1m), fetch the data and calculate MAs
+            # Now that the candle should have closed (or custom interval passed), fetch the data and calculate MAs
             data = get_crypto_data_and_mas(binance_symbol, interval, [fast_ma_period, slow_ma_period], fetch_limit, binance_client, ma_type)
 
             current_confirmed_mas = data['current_confirmed_mas']
@@ -721,12 +892,13 @@ def monitor_mas_on_candle_close():
                         print("No primary crossover detected in this update.")
 
                     # --- Backup Signal Logic (if no primary signal triggered) ---
-                    # This logic ensures the bot attempts to correct its state if it somehow gets out of sync
-                    # with the MA crossover state without a direct crossover signal.
-                    # This might happen if the bot was stopped and restarted, or if there was a rapid price movement.
+                    # This logic ensures the bot attempts to provide a trade if its internal state
+                    # (derived from MAs) is out of sync with its actual managed holding state,
+                    # without a direct crossover signal. This might happen if the bot was stopped
+                    # and restarted, or if there was a rapid price movement.
                     
-                    # If current state is HOLDING but previous was CASH, and no primary buy signal
-                    if derived_bot_state == "HOLDING" and previous_derived_bot_state == "CASH" and last_trade_type != 'BUY':
+                    # If current MA state is HOLDING but bot's last action was not BUY or bot has no managed holding
+                    if derived_bot_state == "HOLDING" and (last_trade_type != 'BUY' or bot_managed_holding == 0.0):
                         print(f"!!! BACKUP BUY SIGNAL DETECTED !!! State changed from CASH to HOLDING without primary crossover.")
                         order_rate = None
                         if order_execution_type == 'limit':
@@ -744,8 +916,8 @@ def monitor_mas_on_candle_close():
                         else:
                             print("Real backup buy order failed, not updating bot managed holding.")
 
-                    # If current state is CASH but previous was HOLDING, and no primary sell signal
-                    elif derived_bot_state == "CASH" and previous_derived_bot_state == "HOLDING" and bot_managed_holding > 0 and last_trade_type != 'SELL':
+                    # If current MA state is CASH but bot has managed holding and last action was not SELL
+                    elif derived_bot_state == "CASH" and bot_managed_holding > 0 and last_trade_type != 'SELL':
                         print(f"!!! BACKUP SELL SIGNAL DETECTED !!! State changed from HOLDING to CASH without primary crossover.")
                         order_rate = None
                         if order_execution_type == 'limit':
